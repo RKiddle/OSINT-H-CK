@@ -1,83 +1,118 @@
-#### pip install exif
+"""Extract GPS coordinates from an image's EXIF metadata.
+
+This script reads GPS latitude/longitude stored in EXIF as DMS (degrees, minutes,
+seconds) plus a reference (N/S/E/W) and converts them into decimal degrees.
+
+Install dependency:
+  pip install exif
+
+Usage:
+  python geolocator.py path/to/image.jpg
+
+Exit codes:
+  0  GPS coordinates found
+  1  No GPS coordinates (or no EXIF)
+  2  File not found
+  3  Could not read/parse EXIF data
+
+Notes / edge cases handled:
+  - EXIF GPS components are often rationals; this script converts them safely to float.
+  - Missing or unexpected GPS references (lat_ref/lon_ref) are treated as "no GPS".
+"""
+
+from __future__ import annotations
 
 import sys
+from pathlib import Path
+from typing import Any, Iterable, Optional, Tuple
+
 from exif import Image
 
-def convert_to_decimal(coords, reference):
-    """
-    Converts EXIF GPS format (Degrees, Minutes, Seconds) 
-    into Decimal Degrees for Google Maps.
-    """
-    # coordinates come as a tuple: (degrees, minutes, seconds)
-    decimal_degrees = coords[0] + (coords[1] / 60.0) + (coords[2] / 3600.0)
-    
-    # South and West coordinates must be negative in decimal format
-    if reference == "S" or reference == "W":
+def _to_float(value: Any) -> float:
+    """Convert EXIF number/rational-like values to float."""
+    try:
+        return float(value)
+    except Exception:
+        numerator = getattr(value, "numerator", None)
+        denominator = getattr(value, "denominator", None)
+        if numerator is not None and denominator not in (None, 0):
+            return float(numerator) / float(denominator)
+        raise
+
+def convert_to_decimal(coords: Iterable[Any], reference: str) -> float:
+    """Convert EXIF GPS DMS coords to decimal degrees."""
+    dms = list(coords)
+    if len(dms) != 3:
+        raise ValueError(f"Expected 3 DMS components, got {len(dms)}")
+
+    degrees, minutes, seconds = dms
+    decimal_degrees = (
+        _to_float(degrees) + (_to_float(minutes) / 60.0) + (_to_float(seconds) / 3600.0)
+    )
+
+    ref = (reference or "").strip().upper()
+    if ref in {"S", "W"}:
         decimal_degrees = -decimal_degrees
-        
+    elif ref in {"N", "E"}:
+        pass
+    else:
+        raise ValueError(f"Unexpected GPS reference: {reference!r}")
+
     return decimal_degrees
 
-def extract_gps(image_path):
+def extract_gps(image_path: Path) -> Optional[Tuple[float, float]]:
+    """Return (lat, lon) if present, otherwise None."""
+    with image_path.open("rb") as image_file:
+        img = Image(image_file)
+
+    if not getattr(img, "has_exif", False):
+        return None
+
+    required = (
+        "gps_latitude",
+        "gps_latitude_ref",
+        "gps_longitude",
+        "gps_longitude_ref",
+    )
+    if not all(hasattr(img, attr) for attr in required):
+        return None
+
+    lat = convert_to_decimal(img.gps_latitude, img.gps_latitude_ref)
+    lon = convert_to_decimal(img.gps_longitude, img.gps_longitude_ref)
+
+    # Basic sanity check; if out of range treat as missing/invalid
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None
+
+    return lat, lon
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2:
+        print("Usage: python geolocator.py <path_to_image>", file=sys.stderr)
+        return 3
+
+    image_path = Path(argv[1])
+
+    if not image_path.exists():
+        print(f"Error: Could not find the file at '{image_path}'", file=sys.stderr)
+        return 2
+
     try:
-        with open(image_path, 'rb') as image_file:
-            img = Image(image_file)
-    except FileNotFoundError:
-        print(f"Error: Could not find the file at '{image_path}'")
-        return
+        result = extract_gps(image_path)
     except Exception as e:
-        print(f"Error reading file: {e}")
-        return
+        print(f"Error reading EXIF/GPS data: {e}", file=sys.stderr)
+        return 3
 
-    # Check if the image has any metadata at all
-    if not img.has_exif:
-        print("no GPS coordinates (No EXIF data found)")
-        return
+    if result is None:
+        print("No GPS coordinates found.")
+        return 1
 
-    # Try to extract the specific GPS tags
-    try:
-        if hasattr(img, 'gps_latitude') and hasattr(img, 'gps_longitude'):
-            # Fetch coordinates and their directional references (N/S, E/W)
-            lat = convert_to_decimal(img.gps_latitude, img.gps_latitude_ref)
-            lon = convert_to_decimal(img.gps_longitude, img.gps_longitude_ref)
-
-            print("--- GPS DATA FOUND ---")
-            print(f"Latitude:  {lat:.6f}")
-            print(f"Longitude: {lon:.6f}")
-            print(f"Google Maps Link: https://www.google.com/maps?q={lat},{lon}")
-        else:
-            print("no GPS coordinates")
-    except Exception as e:
-        print("no GPS coordinates")
+    lat, lon = result
+    print("--- GPS DATA FOUND ---")
+    print(f"Latitude:  {lat:.6f}")
+    print(f"Longitude: {lon:.6f}")
+    print(f"Google Maps Link: https://www.google.com/maps?q={lat},{lon}")
+    return 0
 
 if __name__ == "__main__":
-    # Ensure the user provided a file path as an argument
-    if len(sys.argv) != 2:
-        print("Usage: python geolocator.py <path_to_image>")
-    else:
-        extract_gps(sys.argv[1])
-
-
-"""
-How to Run It
-Open your terminal or command prompt, navigate to the folder where you saved geolocator.py, and pass an image file as an argument.
-
-If the image has no location data:
-
-Bash
-$ python geolocator.py vacation_photo_stripped.jpg
-no GPS coordinates
-If the image contains location data:
-
-Bash
-$ python geolocator.py vacation_photo_original.jpg
---- GPS DATA FOUND ---
-Latitude:  48.858370
-Longitude: 2.294481
-Google Maps Link: https://www.google.com/maps?q=48.858370,2.294481
-How the Magic Works
-Cameras and smartphones do not save GPS coordinates as standard decimals (like 48.858370). 
-Instead, they save them in the EXIF data as a tuple of Degrees, Minutes, and Seconds (DMS), along with a compass reference (North, South, East, West).
-
-The convert_to_decimal function in the script does the necessary math to convert that DMS format into the Decimal Degree format that Google Maps requires to drop a pin. 
-It also checks if the coordinate is South or West, and if so, turns the number negative, which is the standard geographic formatting rule.
-"""
+    raise SystemExit(main(sys.argv))
