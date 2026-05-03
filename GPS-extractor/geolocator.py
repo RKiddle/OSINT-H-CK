@@ -1,6 +1,55 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+"""geolocator.py
+
+Extract EXIF metadata (especially GPS coordinates) from image files.
+
+This script is designed for OSINT / DFIR style workflows where you want to quickly
+answer questions like:
+
+- "Does this image contain EXIF data at all?"
+- "Which device/software created it?"
+- "When was it taken?"
+- "Does it contain GPS coordinates and a ready-to-click map URL?"
+
+Typical use cases / examples
+----------------------------
+
+1) Single image triage
+   Quickly check whether a photo has GPS metadata and get a Google Maps link:
+
+       python3 geolocator.py ~/case/photo.jpg --pretty
+
+   Exit codes (single-file mode):
+   - 0: GPS found
+   - 1: no GPS found (but file processed)
+   - 3: error reading/parsing
+
+2) Bulk extraction for a folder (recursive by default)
+   Produce a JSON array you can post-process with jq:
+
+       python3 geolocator.py ./images --pretty | jq '.[] | {file, gps, date_taken}'
+
+3) JSONL output for pipelines
+   JSONL is convenient for streaming large sets of files (one JSON object per line):
+
+       python3 geolocator.py ./images --jsonl-out exif.jsonl
+       cat exif.jsonl | jq -r 'select(.gps) | .file + "\t" + .gps.map_url'
+
+4) Include raw EXIF tags when you need maximum detail
+
+       python3 geolocator.py ./images --include-tags --pretty
+
+Notes
+-----
+- GPS coordinates in EXIF are usually stored as Degrees/Minutes/Seconds (DMS) plus
+  a reference (N/S/E/W). This script converts DMS to signed decimal degrees.
+- Not all image types reliably contain EXIF (e.g., many PNGs). "exif_present" will
+  be false if no tags are found.
+
+"""
+
 import argparse
 import json
 import os
@@ -11,6 +60,13 @@ import exifread
 
 
 def _clean(v: Any) -> Optional[str]:
+    """Normalize a value to a non-empty string.
+
+    Use case:
+        exifread tags may return objects, empty strings, or None. This helper makes
+        downstream checks ("if v:") reliable.
+    """
+
     if v is None:
         return None
     s = str(v).strip()
@@ -18,6 +74,13 @@ def _clean(v: Any) -> Optional[str]:
 
 
 def _first(*vals: Optional[str]) -> Optional[str]:
+    """Return the first non-empty string from a list of candidates.
+
+    Use case:
+        EXIF date can be stored in different fields depending on camera/software.
+        This helper picks the first populated field.
+    """
+
     for v in vals:
         if v:
             return v
@@ -25,6 +88,15 @@ def _first(*vals: Optional[str]) -> Optional[str]:
 
 
 def _exifread_get_str(tags: Dict[str, Any], key: str) -> Optional[str]:
+    """Read a tag from exifread's dict and return it as a clean string.
+
+    Example:
+        make = _exifread_get_str(tags, "Image Make")
+        model = _exifread_get_str(tags, "Image Model")
+
+    exifread sometimes exposes a tag object whose first element is inside `.values`.
+    """
+
     tag = tags.get(key)
     if not tag:
         return None
@@ -35,6 +107,12 @@ def _exifread_get_str(tags: Dict[str, Any], key: str) -> Optional[str]:
 
 
 def _ratio_to_float(x: Any) -> float:
+    """Convert exifread Ratio (num/den) or a numeric value to float.
+
+    Use case:
+        GPS DMS values are often stored as rational numbers (e.g., 51/1 degrees).
+    """
+
     num = getattr(x, "num", None)
     den = getattr(x, "den", None)
     if num is not None and den not in (None, 0):
@@ -43,6 +121,20 @@ def _ratio_to_float(x: Any) -> float:
 
 
 def _dms_to_decimal(dms_tag: Any, ref_tag: Any) -> float:
+    """Convert EXIF GPS DMS coordinates to signed decimal degrees.
+
+    Inputs:
+        dms_tag: a tag with 3 components: degrees, minutes, seconds
+        ref_tag: a tag with N/S/E/W
+
+    Example:
+        - Latitude: 40° 26' 46" N  ->  40.446111...
+        - Longitude: 79° 58' 56" W -> -79.982222...
+
+    This conversion is necessary because mapping tools and GIS systems typically
+    use decimal degrees.
+    """
+
     dms = list(getattr(dms_tag, "values", dms_tag))
     if len(dms) != 3:
         raise ValueError(f"Expected 3 DMS components, got {len(dms)}")
@@ -62,10 +154,36 @@ def _dms_to_decimal(dms_tag: Any, ref_tag: Any) -> float:
 
 
 def _map_url(lat: float, lon: float) -> str:
+    """Build a clickable map URL.
+
+    Use case:
+        Many OSINT workflows want a direct link you can paste into a browser.
+
+    Example output:
+        http://maps.google.com/?q=37.421999,-122.084057
+    """
+
     return f"http://maps.google.com/?q={lat:.6f},{lon:.6f}"
 
 
 def extract_record(file_path: str, include_tags: bool) -> Dict[str, Any]:
+    """Extract a normalized record from a single file.
+
+    Returned schema (high level):
+        {
+          "file": "...",
+          "exif_present": true/false,
+          "captured_with": "Apple iPhone 14" | "Adobe Photoshop" | null,
+          "date_taken": "2024:03:01 12:34:56" | null,
+          "gps": {"lat": ..., "lon": ..., "map_url": "..."} | null,
+          "errors": ["..."]
+        }
+
+    Use case:
+        This structure is meant to be easy to post-process in scripts, spreadsheets,
+        or tools like jq / pandas.
+    """
+
     errors: List[str] = []
     out: Dict[str, Any] = {
         "file": file_path,
@@ -84,15 +202,22 @@ def extract_record(file_path: str, include_tags: bool) -> Dict[str, Any]:
         out["exif_present"] = bool(tags)
 
         if include_tags:
+            # Use case:
+            #   If you plan to do deeper attribution (lens model, serial numbers,
+            #   editing software history, etc.), keeping the raw tag text can help.
             out["tags"] = {k: str(v) for k, v in tags.items()}
 
         make = _exifread_get_str(tags, "Image Make")
         model = _exifread_get_str(tags, "Image Model")
         software = _exifread_get_str(tags, "Image Software")
 
+        # Example:
+        #   Make="Apple", Model="iPhone 14" -> "Apple iPhone 14"
         if make or model:
             out["captured_with"] = " ".join([x for x in (make, model) if x])
         else:
+            # Fallback example:
+            #   Screenshots or edited images often have Software but no Make/Model.
             out["captured_with"] = software
 
         out["date_taken"] = _first(
@@ -101,6 +226,7 @@ def extract_record(file_path: str, include_tags: bool) -> Dict[str, Any]:
             _exifread_get_str(tags, "Image DateTime"),
         )
 
+        # GPS tags (if present) are split into coordinate values and references.
         lat_tag = tags.get("GPS GPSLatitude")
         lat_ref_tag = tags.get("GPS GPSLatitudeRef")
         lon_tag = tags.get("GPS GPSLongitude")
@@ -109,6 +235,8 @@ def extract_record(file_path: str, include_tags: bool) -> Dict[str, Any]:
         if lat_tag and lat_ref_tag and lon_tag and lon_ref_tag:
             lat = _dms_to_decimal(lat_tag, lat_ref_tag)
             lon = _dms_to_decimal(lon_tag, lon_ref_tag)
+
+            # Sanity-check range to avoid emitting nonsense coordinates.
             if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
                 out["gps"] = {"lat": lat, "lon": lon, "map_url": _map_url(lat, lon)}
 
@@ -119,6 +247,17 @@ def extract_record(file_path: str, include_tags: bool) -> Dict[str, Any]:
 
 
 def iter_files(input_path: str, extensions: Iterable[str], recursive: bool) -> List[str]:
+    """List image files to process.
+
+    Use cases:
+        - input_path is a file: return [that file]
+        - input_path is a directory: return all matching files
+        - recursive=True is useful when you have nested exports (e.g., phone backups)
+
+    Example:
+        files = iter_files("./DCIM", [".jpg", ".jpeg"], recursive=True)
+    """
+
     p = Path(input_path)
     exts = {e.lower() if e.startswith(".") else f".{e.lower()}" for e in extensions}
 
@@ -142,6 +281,17 @@ def iter_files(input_path: str, extensions: Iterable[str], recursive: bool) -> L
 
 
 def write_jsonl(records: List[Dict[str, Any]], out_path: Optional[str]) -> None:
+    """Write records as JSONL (or to stdout if out_path is None).
+
+    Use case:
+        JSONL is a good interchange format for large batches and incremental
+        processing.
+
+    Example:
+        write_jsonl(records, "results.jsonl")
+        # then: jq -c 'select(.gps != null)' results.jsonl
+    """
+
     if out_path:
         with open(out_path, "w", encoding="utf-8") as f:
             for obj in records:
@@ -152,6 +302,18 @@ def write_jsonl(records: List[Dict[str, Any]], out_path: Optional[str]) -> None:
 
 
 def main() -> int:
+    """CLI entrypoint.
+
+    Examples:
+        python3 geolocator.py photo.jpg --pretty
+        python3 geolocator.py ./images --jsonl-out out.jsonl
+
+    Tip:
+        If you only care about GPS hits when scanning a directory, you can do:
+
+            python3 geolocator.py ./images --jsonl | jq -c 'select(.gps)'
+    """
+
     ap = argparse.ArgumentParser(description="EXIF extractor (exifread-only) with JSONL output")
     ap.add_argument("input", help="Image file or directory")
     ap.add_argument("--jsonl", action="store_true", help="Emit JSONL (one object per line)")
@@ -168,7 +330,7 @@ def main() -> int:
 
     input_path = args.input
     p = Path(input_path)
-    exts = [e.strip() for e in args.extensions.split(",") if e.strip()]
+    exts = [e.strip() for e in args.extensions.split(";") if e.strip()]
 
     jsonl_mode = bool(args.jsonl or args.jsonl_out)
 
