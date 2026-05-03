@@ -1,74 +1,79 @@
 import os
 import json
-import argparse
-from typing import List, Dict, Any, Optional
+import exifread
+import logging
 
+# Initialize logging
+logging.basicConfig(level=logging.INFO)
 
-def extract_exif_data(file_path: str) -> Dict[str, Any]:
-    """Extract EXIF data from an image file."""
-    # Implementation of EXIF extraction using exif or exifread
-    pass  # Replace with actual logic
+# Function to get GPS coordinates
 
+def get_gps_coordinates(exif):
+    gps_latitude = exif.get('GPS GPSLatitude')
+    gps_longitude = exif.get('GPS GPSLongitude')
+    if gps_latitude and gps_longitude:
+        lat_ref = exif.get('GPS GPSLatitudeRef')
+        lon_ref = exif.get('GPS GPSLongitudeRef')
 
-def process_file(file_path: str) -> Dict[str, Any]:
-    """Process a single file and extract EXIF data."""
-    exif_data = extract_exif_data(file_path)
-    # Populate the result dictionary with required fields
-    result = {
-        'file': file_path,
-        'exif_present': bool(exif_data),
-        'captured_with': exif_data.get('make_and_model', None),
-        'date_taken': exif_data.get('DateTimeOriginal', exif_data.get('DateTimeDigitized', None)),
-        'gps': {
-            'lat': exif_data.get('lat'),
-            'lon': exif_data.get('lon'),
-            'map_url': f'http://maps.google.com/?q={{lat:.6f}},{{lon:.6f}}' if exif_data.get('lat') and exif_data.get('lon') else None
-        },
-        'errors': [],
-        'tool': 'exif' if 'exif' in exif_data else 'exifread',
-    }
-    return result
+        latitude = convert_to_degrees(gps_latitude) * (1 if lat_ref == 'N' else -1)
+        longitude = convert_to_degrees(gps_longitude) * (1 if lon_ref == 'E' else -1)
+        return latitude, longitude
+    return None, None
 
+# Helper function to convert GPS coordinates
 
-def process_directory(directory: str, extensions: List[str], recursive: bool) -> List[Dict[str, Any]]:
-    """Process all images in a directory."""
+def convert_to_degrees(value):
+    d = float(value[0].num) / float(value[0].den)
+    m = float(value[1].num) / float(value[1].den)
+    s = float(value[2].num) / float(value[2].den)
+    return d + (m / 60.0) + (s / 3600.0)
+
+# Main function to extract EXIF data
+
+def extract_exif_data(file_path):
+    errors = []
+    data = {'errors': errors}
+    try:
+        with open(file_path, 'rb') as f:
+            exif = exifread.process_file(f, stop_tag='GPSLatitude')
+
+            # Extracting relevant EXIF data
+            data['captured_with'] = f"{exif.get('Image Make', 'Unknown')} {exif.get('Image Model', 'Unknown')}" or exif.get('Image Software', 'Unknown')
+            data['date_taken'] = exif.get('EXIF DateTimeOriginal') or exif.get('EXIF DateTimeDigitized') or exif.get('Image DateTime')
+            lat, lon = get_gps_coordinates(exif)
+            data['gps'] = {'latitude': lat, 'longitude': lon, 'map_url': f'http://maps.google.com/?q={{lat:.6f}},{{lon:.6f}}' if lat is not None and lon is not None else None}
+    except Exception as e:
+        logging.error(f"Error processing {file_path}: {e}")
+        errors.append(str(e))
+
+    return data
+
+# Directory processing
+
+def process_directory(directory):
     results = []
-    for root, _, files in os.walk(directory):
-        for file in files:
-            if any(file.lower().endswith(ext) for ext in extensions):
-                file_path = os.path.join(root, file)
-                result = process_file(file_path)
-                results.append(result)
-        if not recursive:
-            break
+    for filename in os.listdir(directory):
+        if filename.endswith(('.jpg', '.jpeg', '.png')):  # Add your allowed extensions here
+            file_path = os.path.join(directory, filename)
+            exif_data = extract_exif_data(file_path)
+            results.append(exif_data)
     return results
 
+# Set tool to 'exifread'
+# Handle JSONL output
 
-def main():
-    parser = argparse.ArgumentParser(description='EXIF Metadata Extractor')
-    parser.add_argument('input', help='Single file or directory to process')
-    parser.add_argument('--jsonl', action='store_true', help='Output JSONL format (one object per line)')
-    parser.add_argument('--pretty', action='store_true', help='Pretty print the JSON output')
-    parser.add_argument('--extensions', type=str, default='.jpg,.jpeg,.png,.tif,.tiff,.heic', help='Comma separated list of image extensions to process')
-    parser.add_argument('--no-recursive', action='store_true', help='Don’t recurse into subdirectories')
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Extract EXIF data from images.')
+    parser.add_argument('directory', help='Directory to scan for images')
+    parser.add_argument('--jsonl', action='store_true', help='Output in JSONL format')
     args = parser.parse_args()
 
-    input_path = args.input
-    extensions = args.extensions.split(',')
-    if os.path.isdir(input_path):
-        results = process_directory(input_path, extensions, not args.no_recursive)
-    elif os.path.isfile(input_path):
-        results = [process_file(input_path)]
-    else:
-        print('Error: File or directory not found.')
-        exit(2)
+    results = process_directory(args.directory)
 
     if args.jsonl:
         for result in results:
             print(json.dumps(result))
     else:
-        print(json.dumps(results, indent=4) if args.pretty else json.dumps(results))
-
-
-if __name__ == '__main__':
-    main()
+        print(json.dumps(results, indent=4))
