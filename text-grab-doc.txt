@@ -1,0 +1,45 @@
+trafilatura>=1.12.2
+
+## text-grab
+
+`text-grab` is a small command-line tool for fetching a web page and extracting the main readable article text, especially from news sites.
+
+### Install
+
+```bash
+pip install -r requirements.txt
+chmod +x text-grab
+```
+
+### Usage
+
+Print extracted text to the terminal:
+
+```bash
+./text-grab "https://example.com/article"
+```
+
+Save extracted text to a file:
+
+```bash
+./text-grab "https://example.com/article" -o article.txt
+```
+
+Choose an output format:
+
+```bash
+./text-grab "https://example.com/article" --format markdown
+./text-grab "https://example.com/article" --format json
+```
+
+Exclude comments or links:
+
+```bash
+./text-grab "https://example.com/article" --no-comments --no-links
+```
+
+### Notes
+
+- Best suited to article and news-style pages.
+- If no text is extracted, the page may block fetching or not contain article-like content.
+- You can extend the tool to auto-generate output filenames from the page title or URL slug.
