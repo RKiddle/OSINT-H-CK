@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""News/article text extraction CLI.
+
+Fetches a web page, extracts the main readable article text, and prints it to stdout
+or saves it to a file. Designed for news/article URLs.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+try:
+    import trafilatura
+except ImportError:
+    print(
+        "Error: missing dependency 'trafilatura'. Install it with: pip install trafilatura",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+DEFAULT_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="text-grab",
+        description="Fetch a URL and extract the main readable article text.",
+    )
+    parser.add_argument("url", help="Article/page URL to fetch and extract text from")
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="Save extracted text to this file instead of only printing to stdout",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("txt", "markdown", "json", "xml"),
+        default="txt",
+        help="Output format (default: txt)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=20,
+        help="Network timeout in seconds (default: 20)",
+    )
+    parser.add_argument(
+        "--no-comments",
+        action="store_true",
+        help="Exclude comments from extraction output",
+    )
+    parser.add_argument(
+        "--no-links",
+        action="store_true",
+        help="Exclude links from extraction output where supported",
+    )
+    parser.add_argument(
+        "--user-agent",
+        default=DEFAULT_UA,
+        help="Custom User-Agent string for the request",
+    )
+    return parser
+
+
+def validate_url(url: str) -> bool:
+    return url.startswith("http://") or url.startswith("https://")
+
+
+def extract_content(url: str, output_format: str, timeout: int, no_comments: bool, no_links: bool, user_agent: str) -> str | None:
+    downloaded = trafilatura.fetch_url(
+        url,
+        no_ssl=False,
+        config=trafilatura.settings.use_config(),
+    )
+
+    if not downloaded:
+        return None
+
+    return trafilatura.extract(
+        downloaded,
+        output_format=output_format,
+        include_comments=not no_comments,
+        include_links=not no_links,
+        favor_precision=True,
+        deduplicate=True,
+    )
+
+
+def write_output(text: str, output_path: str) -> None:
+    path = Path(output_path)
+    if path.parent and not path.parent.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if not validate_url(args.url):
+        print("Error: URL must start with http:// or https://", file=sys.stderr)
+        return 2
+
+    try:
+        text = extract_content(
+            url=args.url,
+            output_format=args.format,
+            timeout=args.timeout,
+            no_comments=args.no_comments,
+            no_links=args.no_links,
+            user_agent=args.user_agent,
+        )
+    except KeyboardInterrupt:
+        print("Aborted.", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        print(f"Error: failed to fetch or extract text: {exc}", file=sys.stderr)
+        return 1
+
+    if not text:
+        print("Error: no article text could be extracted from this URL.", file=sys.stderr)
+        return 1
+
+    if args.output:
+        try:
+            write_output(text, args.output)
+        except Exception as exc:
+            print(f"Error: failed to write output file: {exc}", file=sys.stderr)
+            return 1
+
+    print(text)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
