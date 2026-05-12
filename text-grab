@@ -83,6 +83,14 @@ def build_trafilatura_config(timeout: int):
     return config
 
 
+def supports_parameter(func, parameter_name: str) -> bool:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    return parameter_name in signature.parameters
+
+
 def extract_content(url: str, output_format: str, timeout: int, no_comments: bool, no_links: bool, user_agent: str) -> str | None:
     config = build_trafilatura_config(timeout)
 
@@ -91,27 +99,28 @@ def extract_content(url: str, output_format: str, timeout: int, no_comments: boo
         "config": config,
         "user_agent": user_agent,
     }
-
-    try:
-        fetch_signature = inspect.signature(trafilatura.fetch_url)
-        if "timeout" in fetch_signature.parameters:
-            fetch_kwargs["timeout"] = timeout
-    except (TypeError, ValueError):
-        pass
+    if supports_parameter(trafilatura.fetch_url, "timeout"):
+        fetch_kwargs["timeout"] = timeout
 
     downloaded = trafilatura.fetch_url(url, **fetch_kwargs)
 
     if not downloaded:
         return None
 
-    return trafilatura.extract(
-        downloaded,
-        output_format=output_format,
-        include_comments=not no_comments,
-        include_links=not no_links,
-        favor_precision=True,
-        deduplicate=True,
-    )
+    extract_kwargs = {
+        "output_format": output_format,
+    }
+    optional_extract_kwargs = {
+        "include_comments": not no_comments,
+        "include_links": not no_links,
+        "favor_precision": True,
+        "deduplicate": True,
+    }
+    for key, value in optional_extract_kwargs.items():
+        if supports_parameter(trafilatura.extract, key):
+            extract_kwargs[key] = value
+
+    return trafilatura.extract(downloaded, **extract_kwargs)
 
 
 def write_output(text: str, output_path: str) -> None:
