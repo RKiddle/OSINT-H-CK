@@ -77,6 +77,8 @@ def extract_content(url: str, output_format: str, timeout: int, no_comments: boo
         url,
         no_ssl=False,
         config=trafilatura.settings.use_config(),
+        timeout=timeout,
+        user_agent=user_agent,
     )
 
     if not downloaded:
