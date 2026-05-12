@@ -38,8 +38,16 @@ Exclude comments or links:
 ./text-grab "https://example.com/article" --no-comments --no-links
 ```
 
+Control request behavior:
+
+```bash
+./text-grab "https://example.com/article" --timeout 20
+./text-grab "https://example.com/article" --user-agent "Mozilla/5.0"
+```
+
 ### Notes
 
+- `--timeout` and `--user-agent` are passed through to `trafilatura.fetch_url`.
 - Best suited to article and news-style pages.
 - If no text is extracted, the page may block fetching or not contain article-like content.
 - You can extend the tool to auto-generate output filenames from the page title or URL slug.
