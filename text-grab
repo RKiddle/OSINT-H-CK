@@ -8,6 +8,7 @@ or saves it to a file. Designed for news/article URLs.
 from __future__ import annotations
 
 import argparse
+import inspect
 import sys
 from pathlib import Path
 
@@ -72,13 +73,33 @@ def validate_url(url: str) -> bool:
     return url.startswith("http://") or url.startswith("https://")
 
 
+def build_trafilatura_config(timeout: int):
+    config = trafilatura.settings.use_config()
+    if config is not None and hasattr(config, "set"):
+        try:
+            config.set("DEFAULT", "DOWNLOAD_TIMEOUT", str(timeout))
+        except Exception:
+            pass
+    return config
+
+
 def extract_content(url: str, output_format: str, timeout: int, no_comments: bool, no_links: bool, user_agent: str) -> str | None:
-    downloaded = trafilatura.fetch_url(
-        url,
-        no_ssl=False,
-        config=trafilatura.settings.use_config(),
-        user_agent=user_agent,
-    )
+    config = build_trafilatura_config(timeout)
+
+    fetch_kwargs = {
+        "no_ssl": False,
+        "config": config,
+        "user_agent": user_agent,
+    }
+
+    try:
+        fetch_signature = inspect.signature(trafilatura.fetch_url)
+        if "timeout" in fetch_signature.parameters:
+            fetch_kwargs["timeout"] = timeout
+    except (TypeError, ValueError):
+        pass
+
+    downloaded = trafilatura.fetch_url(url, **fetch_kwargs)
 
     if not downloaded:
         return None
